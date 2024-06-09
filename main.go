@@ -1,18 +1,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"encoding/xml"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 const (
 	uploadPath                = "/upload"
+	readFilePath              = "/read"
 	contentTypeTextXML        = "text/xml"
 	contentTypeApplicationXML = "application/xml"
 
@@ -20,19 +27,26 @@ const (
 	keyFileEnv  = "KEY_FILE"
 )
 
-type xmlPayload struct {
-	UserFrom string `xml:"UserFrom"`
-	UserTo   string `xml:"UserTo"`
-	Message  string `xml:"Message"`
+func mustObjectStorage(endpoint, accessKey, secretKey string) *minio.Client {
+	cli, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
+		Secure: false,
+	})
+	if err != nil {
+		log.Fatal("failed to init object storage", err)
+	}
+	return cli
 }
 
 func main() {
 	baseCtx := context.Background()
 	ctx, globalCancel := signal.NotifyContext(baseCtx, syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL)
 
+	cli := mustObjectStorage("localhost:9000", "minioadmin", "minioadmin")
+
 	serv := &http.Server{
 		Addr:    ":8000",
-		Handler: &xmlParseHandler{},
+		Handler: newXMLParseHandler(cli),
 	}
 
 	var certFile, keyFile string
@@ -64,14 +78,33 @@ func main() {
 	}
 }
 
-type xmlParseHandler struct{}
+type xmlParseHandler struct {
+	cli      *minio.Client
+	reqCount atomic.Int64
+}
+
+func newXMLParseHandler(cli *minio.Client) *xmlParseHandler {
+	return &xmlParseHandler{cli: cli}
+}
 
 func (xph *xmlParseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != uploadPath {
+	switch r.URL.Path {
+	case uploadPath:
+		xph.handleUpload(w, r)
+	case readFilePath:
+		xph.handleRead(w, r)
+	default:
 		writeNotFound(w)
-		return
 	}
+}
 
+func writeNotFound(w http.ResponseWriter) {
+	_, _ = w.Write([]byte(
+		"<p>Oops, you walked the wrong path</p>",
+	))
+}
+
+func (xph *xmlParseHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -81,21 +114,60 @@ func (xph *xmlParseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	handleUpload(w, r)
-}
 
-func writeNotFound(w http.ResponseWriter) {
-	_, _ = w.Write([]byte(
-		"<p>Oops, you walked the wrong path</p>",
-	))
-}
-
-func handleUpload(w http.ResponseWriter, r *http.Request) {
-	decoder := xml.NewDecoder(r.Body)
-	v := xmlPayload{}
-	if err := decoder.Decode(&v); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+	rawXML, err := io.ReadAll(r.Body)
+	if err != nil {
+		httpWrite(w, http.StatusInternalServerError, []byte("failed to read content from body"))
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+
+	bucketID := xph.composeBucketID()
+	_, err = xph.cli.PutObject(r.Context(), "bucket1", bucketID, bytes.NewBuffer(rawXML), int64(len(rawXML)), minio.PutObjectOptions{})
+	if err != nil {
+		httpWrite(w, http.StatusInternalServerError, []byte("failed to upload object"))
+		return
+	}
+
+	httpWrite(w, http.StatusOK, []byte(bucketID))
+}
+
+func (xph *xmlParseHandler) handleRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", contentTypeApplicationXML)
+
+	bucketID := r.URL.Query().Get("bucket_id")
+	if bucketID == "" {
+		httpWrite(w, http.StatusBadRequest, []byte("bucket_id is required"))
+		return
+	}
+
+	obj, err := xph.cli.GetObject(r.Context(), "bucket1", bucketID, minio.GetObjectOptions{})
+	if err != nil {
+		httpWrite(w, http.StatusInternalServerError, []byte("failed to get object"))
+		return
+	}
+
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		httpWrite(w, http.StatusInternalServerError, []byte("failed to read object"))
+	}
+
+	httpWrite(w, http.StatusOK, data)
+}
+
+func (xph *xmlParseHandler) composeBucketID() string {
+	return fmt.Sprintf(
+		"xmlobject/%d",
+		xph.reqCount.Add(1),
+	)
+}
+
+func httpWrite(w http.ResponseWriter, statusCode int, data []byte) {
+	w.WriteHeader(statusCode)
+	if len(data) > 0 {
+		_, _ = w.Write(data)
+	}
 }

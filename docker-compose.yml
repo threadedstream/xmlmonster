@@ -1,0 +1,12 @@
+services:
+  minio:
+    image: minio/minio
+    ports: [ '9000:9000' ]
+    environment:
+      TZ: '${TIMEZONE}'
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    entrypoint: sh
+    command: -c 'mkdir -p /data/bucket && mkdir -p /data/bucket1 && minio server /data'
+    volumes:
+      - ./.minio/data:/data
