@@ -44,6 +44,7 @@ func main() {
 		}
 	}()
 
+	log.Println("starting server with addr", serv.Addr)
 	// spinning up http server
 	if err := serv.ListenAndServe(); err != nil {
 		log.Fatal(err)
@@ -55,6 +56,11 @@ type xmlParseHandler struct{}
 func (xph *xmlParseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != uploadPath {
 		writeNotFound(w)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
