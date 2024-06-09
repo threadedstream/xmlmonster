@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -14,6 +15,9 @@ const (
 	uploadPath                = "/upload"
 	contentTypeTextXML        = "text/xml"
 	contentTypeApplicationXML = "application/xml"
+
+	certFileEnv = "CERT_FILE"
+	keyFileEnv  = "KEY_FILE"
 )
 
 type xmlPayload struct {
@@ -31,6 +35,15 @@ func main() {
 		Handler: &xmlParseHandler{},
 	}
 
+	var certFile, keyFile string
+	if certFile = os.Getenv(certFileEnv); certFile == "" {
+		log.Fatal("Missing required environment variable: " + certFileEnv)
+	}
+
+	if keyFile = os.Getenv(keyFileEnv); keyFile == "" {
+		log.Fatal("Missing required environment variable: " + keyFileEnv)
+	}
+
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -46,7 +59,7 @@ func main() {
 
 	log.Println("starting server with addr", serv.Addr)
 	// spinning up http server
-	if err := serv.ListenAndServe(); err != nil {
+	if err := serv.ListenAndServeTLS(certFile, keyFile); err != nil {
 		log.Fatal(err)
 	}
 }
